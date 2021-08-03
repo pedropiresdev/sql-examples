@@ -1,0 +1,141 @@
+WITH production ( date, val1 ) as (
+	SELECT
+		to_char(u.datetime_read, 'YYYY-MM-DD HH24:MI') as date,
+		(SUM(u.value)/60 * 5.8) as production
+	FROM utility_raw u
+		LEFT JOIN plant_equipment eqp on eqp.plant_equipment_id = u.plant_equipment_id
+		LEFT JOIN plant_equipment_nature eqn ON eqn.plant_equipment_nature_id = eqp.plant_equipment_nature_id
+		LEFT JOIN plant_point pp on pp.plant_point_id = eqp.plant_point_id
+	WHERE eqp.name = 'AP-45-01A - ST4501A_ANT' 
+		AND u.datetime_read BETWEEN now() - interval '60 minutes' and now()
+		AND _except:0_
+	GROUP BY 1
+
+),
+cte_now (date, val1, val2) as (
+	SELECT
+		to_char(u.datetime_read, 'YYYY-MM-DD HH24:MI') as date,
+		SUM( CASE WHEN eqp.name in (
+			'QDF1307 - EnergiaAtivaConsumida', 'CCM1310 - EnergiaAtivaConsumida',
+			'Exaustor02B - EnergiaAtivaConsumida', 'Exaustor02A - PotenciaAtiva Total')
+			THEN u.value else 0
+			END ) AS consumo_secadorA,
+
+		SUM( CASE WHEN eqp.name in (
+			'CT-244 - EnergiaAtivaConsumida', 'RRC-244-01 - EnergiaAtivaConsumida') 
+			THEN u.value else null
+			END ) AS consumo_diferencial
+	FROM utility_raw u
+		LEFT JOIN plant_equipment eqp ON eqp.plant_equipment_id = u.plant_equipment_id
+		LEFT JOIN plant_equipment_nature eqn ON eqn.plant_equipment_nature_id = eqp.plant_equipment_nature_id
+		LEFT JOIN plant_point pp on pp.plant_point_id = eqp.plant_point_id
+	WHERE eqp.name in (
+		'QDF1307 - EnergiaAtivaConsumida', 'CCM1310 - EnergiaAtivaConsumida',
+		'Exaustor02B - EnergiaAtivaConsumida', 'Exaustor02A - EnergiaAtivaConsumida',
+		'CT-244 - EnergiaAtivaConsumida', 'RRC-244-01 - EnergiaAtivaConsumida'
+	)
+		AND _except:0_
+		AND u.datetime_read BETWEEN now() - interval '60 minutes' and now() 
+
+	GROUP BY 1
+	ORDER BY 1
+),
+cte_before (date, val1, val2) as (
+	SELECT
+		to_char(u.datetime_read, 'YYYY-MM-DD HH24:MI') as date,
+		SUM( CASE WHEN eqp.name in (
+			'QDF1307 - EnergiaAtivaConsumida', 'CCM1310 - EnergiaAtivaConsumida',
+			'Exaustor02B - EnergiaAtivaConsumida', 'Exaustor02A - PotenciaAtiva Total')
+			THEN u.value else 0
+			END ) AS consumo_secadorA,
+
+		SUM( CASE WHEN eqp.name in (
+			'CT-244 - EnergiaAtivaConsumida', 'RRC-244-01 - EnergiaAtivaConsumida') 
+			THEN u.value else null
+			END ) AS consumo_diferencial
+	FROM utility_raw u
+		LEFT JOIN plant_equipment eqp ON eqp.plant_equipment_id = u.plant_equipment_id
+		LEFT JOIN plant_equipment_nature eqn ON eqn.plant_equipment_nature_id = eqp.plant_equipment_nature_id
+		LEFT JOIN plant_point pp on pp.plant_point_id = eqp.plant_point_id
+	WHERE eqp.name in (
+		'QDF1307 - EnergiaAtivaConsumida', 'CCM1310 - EnergiaAtivaConsumida',
+		'Exaustor02B - EnergiaAtivaConsumida', 'Exaustor02A - EnergiaAtivaConsumida',
+		'CT-244 - EnergiaAtivaConsumida', 'RRC-244-01 - EnergiaAtivaConsumida'
+	)
+		AND _except:0_
+		AND u.datetime_read BETWEEN now() - interval '65 minutes' and now() - interval '5 minutes'
+
+	GROUP BY 1
+	ORDER BY 1
+),
+period as (
+	SELECT date FROM cte_now
+
+	UNION
+
+	SELECT date FROM cte_before
+),
+source_table  as (
+	SELECT s.data_atual, s.data_anterior FROM (
+		SELECT
+			to_char(d, 'YYYY-MM-DD HH24:MI') as data_atual,
+			GREATEST( p.date, p2.date, p3.date, p4.date, p5.date ) as data_anterior
+		FROM generate_series(now() - interval '1 hour', now(), '1 minute') d
+			LEFT JOIN period p on p.date = to_char(d - interval '1 minute', 'YYYY-MM-DD HH24:MI')
+			LEFT JOIN period p2 on p2.date = to_char(d - interval '2 minutes', 'YYYY-MM-DD HH24:MI')
+			LEFT JOIN period p3 on p3.date = to_char(d - interval '3 minutes', 'YYYY-MM-DD HH24:MI')
+			LEFT JOIN period p4 on p4.date = to_char(d - interval '4 minutes', 'YYYY-MM-DD HH24:MI')
+			LEFT JOIN period p5 on p5.date = to_char(d - interval '5 minutes', 'YYYY-MM-DD HH24:MI')
+		) as s
+
+		INNER JOIN period p on p.date = s.data_atual
+),
+
+source_table_without ( data_atual, data_anterior, val1_now, val1_before, val2_now, val2_before) as (
+	SELECT
+		s.data_atual, s.data_anterior, 
+		n.val1, b.val1, n.val2, b.val2
+	FROM source_table s
+	LEFT JOIN cte_before b on b.date = s.data_anterior
+	LEFT JOIN cte_now n on n.date = s.data_atual
+	-- ### Coloque aqui seus filtros de outliers ###
+	WHERE 
+	(n.val1 - b.val1) < 25 AND
+	(n.val1 - b.val1) > 0 AND
+	(n.val2 - b.val2) > 0 AND
+	(n.val1 - b.val1) - (n.val2 - b.val2) > 0
+)
+
+SELECT
+	to_char(s.data_atual::timestamp with time zone,'HH24:MI'),
+	CASE
+		WHEN
+			SUM(p.val1) <= 0
+		THEN
+			0
+		ELSE
+			round( (SUM(s.val1_now - s.val1_before) - SUM(s.val2_now - s.val2_before)) / SUM(p.val1) , 2)::float
+		END as "Consumo Esp. de Energia (kWh/ton)"
+
+FROM source_table_without s
+	LEFT JOIN production p on p.date = s.data_atual
+
+GROUP BY 1
+
+	-- ######### SCRIPT DE TESTE ###########
+-- SELECT
+-- s.data_atual as data_atual,
+-- s.val1_now - s.val1_before as consumo_secadorA,
+-- s.val2_now - s.val2_before as consumo_diferencial,
+-- round((s.val1_now - s.val1_before) - (s.val2_now - s.val2_before),2)::float as consumo_final,
+-- round(p.val1,2)::float as produzido,
+-- CASE
+-- 	  	WHEN
+-- 	  		p.val1 = 0
+-- 	  	THEN 0
+-- 	  	ELSE
+-- 	  		round(((s.val1_now - s.val1_before) - (s.val2_now - s.val2_before))/(p.val1),2)::float
+-- 		END AS consumo_especifico
+
+-- from source_table_without s
+-- 	LEFT JOIN production p on p.date = s.data_atual
